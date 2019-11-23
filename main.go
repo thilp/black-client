@@ -148,12 +148,8 @@ func processPath(conf BlackConfig, path string) PathResult {
 	if !res.Changed {
 		return Unchanged
 	}
-	if conf.Diff {
-		_, err = io.Copy(os.Stdout, res.Text)
-		if err != nil {
-			log.Print(err)
-			return Error
-		}
+	if conf.Diff && !printDiff(path, res.Text) {
+		return Error
 	}
 	if conf.Check {
 		return WouldBeReformatted
@@ -163,6 +159,32 @@ func processPath(conf BlackConfig, path string) PathResult {
 		return Error
 	}
 	return Reformatted
+}
+
+func printDiff(path string, diff io.Reader) bool {
+	buf := bufio.NewReader(diff)
+	ok := printDiffHeader(path, "In", buf)
+	ok = ok && printDiffHeader(path, "Out", buf)
+	if !ok {
+		log.Printf("%s: internal error: blackd returned an invalid diff", path)
+		return false
+	}
+	_, err := io.Copy(os.Stdout, buf)
+	if err != nil {
+		log.Print(err)
+		return false
+	}
+	return true
+}
+
+func printDiffHeader(path string, oldPath string, buf *bufio.Reader) bool {
+	header, err := buf.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	header = strings.Replace(header, oldPath, path, 1)
+	_, _ = os.Stdout.WriteString(header)
+	return true
 }
 
 func queryBlackd(conf BlackConfig, path string) (*http.Response, error) {
