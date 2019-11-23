@@ -87,6 +87,11 @@ func main() {
 		}
 	}
 
+	if unchangedCount == 0 && reformattedCount == 0 && errorCount == 0 {
+		fmt.Println("No Python files are present to be formatted. Nothing to do 😴")
+		return
+	}
+
 	report := strings.Builder{}
 	if unchangedCount > 0 {
 		reportCount(&report, conf.Check, unchangedCount, "would be left unchanged", "left unchanged")
