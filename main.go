@@ -152,12 +152,14 @@ func processPath(conf BlackConfig, path string) PathResult {
 		return Error
 	}
 	if conf.Check {
+		log.Printf("would reformat %s", path)
 		return WouldBeReformatted
 	}
 	if err = overwritePath(path, res.Text); err != nil {
 		log.Print(err)
 		return Error
 	}
+	log.Printf("reformatted %s", path)
 	return Reformatted
 }
 
