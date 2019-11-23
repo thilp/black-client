@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/karrick/godirwalk"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -51,19 +52,37 @@ func main() {
 	reformattedCount := 0
 	errorCount := 0
 	for _, path := range *files {
-		switch processPath(conf, path) {
-		case Unchanged:
-			unchangedCount += 1
-		case Reformatted:
-			reformattedCount += 1
-		case WouldBeReformatted:
-			reformattedCount += 1
-			if exitCode < 1 {
-				exitCode = 1
-			}
-		case Error:
-			errorCount += 1
-			exitCode = 123
+		err := godirwalk.Walk(path, &godirwalk.Options{
+			FollowSymbolicLinks: true,
+			Unsorted:            true,
+			AllowNonDirectory:   true,
+			Callback: func(path string, de *godirwalk.Dirent) error {
+				log.Printf(">>> path=%v de=%v\n", path, *de)
+				if (de.IsRegular() || de.IsSymlink()) && strings.HasSuffix(path, ".py") {
+					switch processPath(conf, path) {
+					case Unchanged:
+						unchangedCount += 1
+					case Reformatted:
+						reformattedCount += 1
+					case WouldBeReformatted:
+						reformattedCount += 1
+						if exitCode < 1 {
+							exitCode = 1
+						}
+					case Error:
+						errorCount += 1
+						exitCode = 123
+					}
+				}
+				return nil
+			},
+			ErrorCallback: func(path string, err error) godirwalk.ErrorAction {
+				log.Printf("cannot format %s: %v", path, err)
+				return godirwalk.SkipNode
+			},
+		})
+		if err != nil {
+			log.Fatalf("error traversing %s: %v", path, err)
 		}
 	}
 
