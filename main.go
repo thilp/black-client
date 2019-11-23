@@ -40,6 +40,7 @@ const (
 )
 
 func main() {
+	log.SetFlags(0)
 	kingpin.Parse()
 	conf := BlackConfig{
 		Url:   fmt.Sprintf("http://localhost:%s", strconv.FormatUint(uint64(*port), 10)),
