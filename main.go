@@ -108,13 +108,16 @@ func main() {
 }
 
 func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, statusWithoutCheck string) {
+	buf.Grow(10 + len(statusWithCheck))
 	if buf.Len() > 0 {
 		buf.WriteString(", ")
 	}
 	buf.WriteString(strconv.Itoa(count))
 	buf.WriteString(" file")
 	if count > 1 {
-		buf.WriteRune('s')
+		buf.WriteString("s ")
+	} else {
+		buf.WriteRune(' ')
 	}
 	if check {
 		buf.WriteString(statusWithCheck)
