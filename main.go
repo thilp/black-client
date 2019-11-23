@@ -58,7 +58,6 @@ func main() {
 			Unsorted:            true,
 			AllowNonDirectory:   true,
 			Callback: func(path string, de *godirwalk.Dirent) error {
-				log.Printf(">>> path=%v de=%v\n", path, *de)
 				if (de.IsRegular() || de.IsSymlink()) && strings.HasSuffix(path, ".py") {
 					switch processPath(conf, path) {
 					case Unchanged:
