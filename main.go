@@ -131,7 +131,7 @@ var client = &http.Client{}
 func processPath(conf BlackConfig, path string) PathResult {
 	resp, err := queryBlackd(conf, path)
 	if err != nil {
-		log.Print(err)
+		log.Printf("error: cannot format %s: %v", path, err)
 		return Error
 	}
 	defer resp.Body.Close()
@@ -142,7 +142,7 @@ func processPath(conf BlackConfig, path string) PathResult {
 			log.Printf("%s: %s", path, blackErr.Msg)
 			return Error
 		}
-		log.Printf("%s: blackd error: %s", path, blackErr.Msg)
+		log.Printf("cannot format %s: %s", path, blackErr.Msg)
 		return Error
 	}
 	if !res.Changed {
@@ -168,7 +168,7 @@ func processPath(conf BlackConfig, path string) PathResult {
 func queryBlackd(conf BlackConfig, path string) (*http.Response, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %v", path, err)
+		return nil, err
 	}
 	defer file.Close()
 
