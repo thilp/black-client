@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/karrick/godirwalk"
 	"gopkg.in/alecthomas/kingpin.v2"
@@ -22,16 +24,13 @@ const (
 	checkHelp = "Don't write the files back, just return the status. " +
 		"Return code 0 means nothing would change. Return code 1 means some files would be reformatted. " +
 		"Return code 123 means there was an internal error."
-	maxConnDefault = "99"
-	maxConnHelp    = "Maximum number of simultaneous connections (goroutines) to Blackd. Defaults to " + maxConnDefault
 )
 
 var (
-	port    = kingpin.Flag("port", portHelp).Required().Envar("BLACKD_PORT").Uint16()
-	diff    = kingpin.Flag("diff", diffHelp).Bool()
-	check   = kingpin.Flag("check", checkHelp).Bool()
-	maxConn = kingpin.Flag("max-connections", maxConnHelp).Default(maxConnDefault).Envar("BLACKD_MAX_CONNECTIONS").Uint16()
-	files   = kingpin.Arg("files", "Files to format").Strings()
+	ports = kingpin.Flag("port", portHelp).Required().Uint16List()
+	diff  = kingpin.Flag("diff", diffHelp).Bool()
+	check = kingpin.Flag("check", checkHelp).Bool()
+	files = kingpin.Arg("files", "Files to format").Strings()
 )
 
 type Action int
@@ -43,34 +42,31 @@ const (
 	Error
 )
 
-var EOL = []byte("\n")
-
 func infof(format string, v ...interface{}) {
 	_, _ = fmt.Fprintf(os.Stderr, format, v...)
-	_, _ = os.Stderr.Write(EOL)
 }
 
 func main() {
 	log.SetFlags(0)
 	kingpin.Parse()
-	conf := BlackConfig{
-		Url:   fmt.Sprintf("http://127.0.0.1:%s", strconv.FormatUint(uint64(*port), 10)),
-		Check: *check,
-		Diff:  *diff,
-	}
-	pathQueue := make(chan string, *maxConn+1)
-	actQueue := make(chan Action)
-	exitQueue := make(chan int)
+
+	pathQueue := make(chan string, len(*ports))
+	actQueue := make(chan Action, 99)
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < int(*maxConn); i++ {
+	for _, port := range *ports {
 		wg.Add(1)
-		go func(i int) {
+		go func(port string) {
+			conf := BlackConfig{
+				Url:   fmt.Sprintf("http://127.0.0.1:%s", port),
+				Check: *check,
+				Diff:  *diff,
+			}
 			for path := range pathQueue {
 				actQueue <- processPath(conf, path)
 			}
 			wg.Done()
-		}(i)
+		}(strconv.FormatUint(uint64(port), 10))
 	}
 
 	go func() {
@@ -78,21 +74,25 @@ func main() {
 		close(actQueue)
 	}()
 
-	go report(conf.Check, actQueue, exitQueue)
+	go walkDirectories(*files, pathQueue)
 
-	for _, path := range *files {
+	os.Exit(report(*check, actQueue))
+}
+
+func walkDirectories(paths []string, pathQueue chan<- string) {
+	for _, path := range paths {
 		err := godirwalk.Walk(path, &godirwalk.Options{
 			FollowSymbolicLinks: true,
 			Unsorted:            true,
 			AllowNonDirectory:   true,
 			Callback: func(path string, de *godirwalk.Dirent) error {
-				if (de.IsRegular() || de.IsSymlink()) && strings.HasSuffix(path, ".py") {
+				if de.IsRegular() && strings.HasSuffix(path, ".py") {
 					pathQueue <- path
 				}
 				return nil
 			},
 			ErrorCallback: func(path string, err error) godirwalk.ErrorAction {
-				infof("cannot format %s: %v", path, err)
+				infof("cannot format %s: %v\n", path, err)
 				return godirwalk.SkipNode
 			},
 		})
@@ -101,10 +101,9 @@ func main() {
 		}
 	}
 	close(pathQueue)
-	os.Exit(<-exitQueue)
 }
 
-func report(check bool, actQueue <-chan Action, exitQueue chan<- int) {
+func report(check bool, actQueue <-chan Action) int {
 	exitCode := 0
 	unchangedCount := 0
 	reformattedCount := 0
@@ -128,8 +127,7 @@ func report(check bool, actQueue <-chan Action, exitQueue chan<- int) {
 
 	if unchangedCount == 0 && reformattedCount == 0 && errorCount == 0 {
 		fmt.Println("No Python files are present to be formatted. Nothing to do 😴")
-		exitQueue <- exitCode
-		return
+		return exitCode
 	}
 
 	b := strings.Builder{}
@@ -144,8 +142,7 @@ func report(check bool, actQueue <-chan Action, exitQueue chan<- int) {
 	}
 	b.WriteRune('.')
 	log.Println(b.String())
-	exitQueue <- exitCode
-	return
+	return exitCode
 }
 
 func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, statusWithoutCheck string) {
@@ -170,17 +167,18 @@ func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, s
 func processPath(conf BlackConfig, path string) Action {
 	resp, err := queryBlackd(conf, path)
 	if err != nil {
-		infof("error: cannot format %s: %v", path, err)
+		infof("error: cannot format %s: %v\n", path, err)
 		return Error
 	}
 	defer resp.Body.Close()
+	defer io.Copy(ioutil.Discard, resp.Body)
 
 	res, blackErr := newBlackResult(resp)
 	if blackErr != nil {
 		if blackErr.Syntax {
-			infof("%s: %s", path, blackErr.Msg)
+			infof("%s: %s\n", path, blackErr.Msg)
 		} else {
-			infof("cannot format %s: %s", path, blackErr.Msg)
+			infof("cannot format %s: %s\n", path, blackErr.Msg)
 		}
 		return Error
 	}
@@ -191,14 +189,14 @@ func processPath(conf BlackConfig, path string) Action {
 		return Error
 	}
 	if conf.Check {
-		infof("would reformat %s", path)
+		infof("would reformat %s\n", path)
 		return WouldBeReformatted
 	}
 	if err = overwritePath(path, res.Text); err != nil {
 		log.Print(err)
 		return Error
 	}
-	infof("reformatted %s", path)
+	infof("reformatted %s\n", path)
 	return Reformatted
 }
 
@@ -207,7 +205,7 @@ func printDiff(path string, diff io.Reader) bool {
 	ok := printDiffHeader(path, "In", buf)
 	ok = ok && printDiffHeader(path, "Out", buf)
 	if !ok {
-		infof("%s: internal error: blackd returned an invalid diff", path)
+		infof("%s: internal error: blackd returned an invalid diff\n", path)
 		return false
 	}
 	_, err := io.Copy(os.Stdout, buf)
@@ -228,7 +226,28 @@ func printDiffHeader(path string, oldPath string, buf *bufio.Reader) bool {
 	return true
 }
 
-var client = &http.Client{}
+func newHttpClient() *http.Client {
+	// http://tleyden.github.io/blog/2016/11/21/tuning-the-go-http-client-library-for-load-testing/
+	// Customize the Transport to have a larger connection pool.
+	defaultRoundTripper := http.DefaultTransport
+	defaultTransportPointer, ok := defaultRoundTripper.(*http.Transport)
+	if !ok {
+		panic(fmt.Sprintf("defaultRoundTripper is not an *http.Transport"))
+	}
+	// Dereference to get a copy of the struct that the pointer points to.
+	defaultTransport := *defaultTransportPointer
+	defaultTransport.MaxIdleConns = 100
+	defaultTransport.MaxIdleConnsPerHost = 100
+
+	return &http.Client{
+		Transport: &defaultTransport,
+		Timeout:   5 * time.Second,
+	}
+}
+
+var (
+	client = newHttpClient()
+)
 
 func queryBlackd(conf BlackConfig, path string) (*http.Response, error) {
 	file, err := os.Open(path)
