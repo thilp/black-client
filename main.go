@@ -53,8 +53,25 @@ func main() {
 	}
 	pathQueue := make(chan string, *maxConn+1)
 	actQueue := make(chan Action)
+	exitQueue := make(chan int)
 
-	go processPathQueue(conf, pathQueue, actQueue)
+	wg := sync.WaitGroup{}
+	for i := 0; i < int(*maxConn); i++ {
+		wg.Add(1)
+		go func(i int) {
+			for path := range pathQueue {
+				actQueue <- processPath(conf, path)
+			}
+			wg.Done()
+		}(i)
+	}
+
+	go func() {
+		wg.Wait()
+		close(actQueue)
+	}()
+
+	go report(conf.Check, actQueue, exitQueue)
 
 	for _, path := range *files {
 		err := godirwalk.Walk(path, &godirwalk.Options{
@@ -77,37 +94,15 @@ func main() {
 		}
 	}
 	close(pathQueue)
-	os.Exit(report(conf.Check, actQueue))
+	os.Exit(<-exitQueue)
 }
 
-func processPathQueue(conf BlackConfig, in <-chan string, out chan<- Action) {
-	var ok bool
-	var path string
-	var wg sync.WaitGroup
-	for {
-		path, ok = <-in
-		if !ok {
-			wg.Wait()
-			close(out)
-			return
-		}
-		wg.Add(1)
-		go processPathInChan(conf, path, out, &wg)
-	}
-}
-
-func report(check bool, actions <-chan Action) int {
+func report(check bool, actQueue <-chan Action, exitQueue chan<- int) {
 	exitCode := 0
 	unchangedCount := 0
 	reformattedCount := 0
 	errorCount := 0
-	var act Action
-	var ok bool
-	for {
-		act, ok = <-actions
-		if !ok {
-			break
-		}
+	for act := range actQueue {
 		switch act {
 		case Unchanged:
 			unchangedCount += 1
@@ -126,22 +121,24 @@ func report(check bool, actions <-chan Action) int {
 
 	if unchangedCount == 0 && reformattedCount == 0 && errorCount == 0 {
 		fmt.Println("No Python files are present to be formatted. Nothing to do 😴")
-		return exitCode
+		exitQueue <- exitCode
+		return
 	}
 
 	b := strings.Builder{}
-	if unchangedCount > 0 {
-		reportCount(&b, check, unchangedCount, "would be left unchanged", "left unchanged")
-	}
 	if reformattedCount > 0 {
 		reportCount(&b, check, reformattedCount, "would be reformatted", "reformatted")
+	}
+	if unchangedCount > 0 {
+		reportCount(&b, check, unchangedCount, "would be left unchanged", "left unchanged")
 	}
 	if errorCount > 0 {
 		reportCount(&b, check, errorCount, "would fail to reformat", "failed to reformat")
 	}
 	b.WriteRune('.')
 	log.Println(b.String())
-	return exitCode
+	exitQueue <- exitCode
+	return
 }
 
 func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, statusWithoutCheck string) {
@@ -161,13 +158,6 @@ func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, s
 	} else {
 		buf.WriteString(statusWithoutCheck)
 	}
-}
-
-var client = &http.Client{}
-
-func processPathInChan(conf BlackConfig, path string, actions chan<- Action, group *sync.WaitGroup) {
-	defer group.Done()
-	actions <- processPath(conf, path)
 }
 
 func processPath(conf BlackConfig, path string) Action {
@@ -230,6 +220,8 @@ func printDiffHeader(path string, oldPath string, buf *bufio.Reader) bool {
 	_, _ = os.Stdout.WriteString(header)
 	return true
 }
+
+var client = &http.Client{}
 
 func queryBlackd(conf BlackConfig, path string) (*http.Response, error) {
 	file, err := os.Open(path)
