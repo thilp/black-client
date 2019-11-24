@@ -43,11 +43,18 @@ const (
 	Error
 )
 
+var EOL = []byte("\n")
+
+func infof(format string, v ...interface{}) {
+	_, _ = fmt.Fprintf(os.Stderr, format, v...)
+	_, _ = os.Stderr.Write(EOL)
+}
+
 func main() {
 	log.SetFlags(0)
 	kingpin.Parse()
 	conf := BlackConfig{
-		Url:   fmt.Sprintf("http://localhost:%s", strconv.FormatUint(uint64(*port), 10)),
+		Url:   fmt.Sprintf("http://127.0.0.1:%s", strconv.FormatUint(uint64(*port), 10)),
 		Check: *check,
 		Diff:  *diff,
 	}
@@ -85,7 +92,7 @@ func main() {
 				return nil
 			},
 			ErrorCallback: func(path string, err error) godirwalk.ErrorAction {
-				log.Printf("cannot format %s: %v", path, err)
+				infof("cannot format %s: %v", path, err)
 				return godirwalk.SkipNode
 			},
 		})
@@ -163,7 +170,7 @@ func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, s
 func processPath(conf BlackConfig, path string) Action {
 	resp, err := queryBlackd(conf, path)
 	if err != nil {
-		log.Printf("error: cannot format %s: %v", path, err)
+		infof("error: cannot format %s: %v", path, err)
 		return Error
 	}
 	defer resp.Body.Close()
@@ -171,9 +178,9 @@ func processPath(conf BlackConfig, path string) Action {
 	res, blackErr := newBlackResult(resp)
 	if blackErr != nil {
 		if blackErr.Syntax {
-			log.Printf("%s: %s", path, blackErr.Msg)
+			infof("%s: %s", path, blackErr.Msg)
 		} else {
-			log.Printf("cannot format %s: %s", path, blackErr.Msg)
+			infof("cannot format %s: %s", path, blackErr.Msg)
 		}
 		return Error
 	}
@@ -184,14 +191,14 @@ func processPath(conf BlackConfig, path string) Action {
 		return Error
 	}
 	if conf.Check {
-		log.Printf("would reformat %s", path)
+		infof("would reformat %s", path)
 		return WouldBeReformatted
 	}
 	if err = overwritePath(path, res.Text); err != nil {
 		log.Print(err)
 		return Error
 	}
-	log.Printf("reformatted %s", path)
+	infof("reformatted %s", path)
 	return Reformatted
 }
 
@@ -200,7 +207,7 @@ func printDiff(path string, diff io.Reader) bool {
 	ok := printDiffHeader(path, "In", buf)
 	ok = ok && printDiffHeader(path, "Out", buf)
 	if !ok {
-		log.Printf("%s: internal error: blackd returned an invalid diff", path)
+		infof("%s: internal error: blackd returned an invalid diff", path)
 		return false
 	}
 	_, err := io.Copy(os.Stdout, buf)
