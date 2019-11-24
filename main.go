@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/karrick/godirwalk"
 	"gopkg.in/alecthomas/kingpin.v2"
@@ -21,19 +22,22 @@ const (
 	checkHelp = "Don't write the files back, just return the status. " +
 		"Return code 0 means nothing would change. Return code 1 means some files would be reformatted. " +
 		"Return code 123 means there was an internal error."
+	maxConnDefault = "99"
+	maxConnHelp    = "Maximum number of simultaneous connections (goroutines) to Blackd. Defaults to " + maxConnDefault
 )
 
 var (
-	port  = kingpin.Flag("port", portHelp).Required().Envar("BLACKD_PORT").Uint16()
-	diff  = kingpin.Flag("diff", diffHelp).Bool()
-	check = kingpin.Flag("check", checkHelp).Bool()
-	files = kingpin.Arg("files", "Files to format").Strings()
+	port    = kingpin.Flag("port", portHelp).Required().Envar("BLACKD_PORT").Uint16()
+	diff    = kingpin.Flag("diff", diffHelp).Bool()
+	check   = kingpin.Flag("check", checkHelp).Bool()
+	maxConn = kingpin.Flag("max-connections", maxConnHelp).Default(maxConnDefault).Envar("BLACKD_MAX_CONNECTIONS").Uint16()
+	files   = kingpin.Arg("files", "Files to format").Strings()
 )
 
-type PathResult int
+type Action int
 
 const (
-	Unchanged PathResult = iota
+	Unchanged Action = iota
 	Reformatted
 	WouldBeReformatted
 	Error
@@ -47,11 +51,11 @@ func main() {
 		Check: *check,
 		Diff:  *diff,
 	}
+	pathQueue := make(chan string, *maxConn+1)
+	actQueue := make(chan Action)
 
-	exitCode := 0
-	unchangedCount := 0
-	reformattedCount := 0
-	errorCount := 0
+	go processPathQueue(conf, pathQueue, actQueue)
+
 	for _, path := range *files {
 		err := godirwalk.Walk(path, &godirwalk.Options{
 			FollowSymbolicLinks: true,
@@ -59,20 +63,7 @@ func main() {
 			AllowNonDirectory:   true,
 			Callback: func(path string, de *godirwalk.Dirent) error {
 				if (de.IsRegular() || de.IsSymlink()) && strings.HasSuffix(path, ".py") {
-					switch processPath(conf, path) {
-					case Unchanged:
-						unchangedCount += 1
-					case Reformatted:
-						reformattedCount += 1
-					case WouldBeReformatted:
-						reformattedCount += 1
-						if exitCode < 1 {
-							exitCode = 1
-						}
-					case Error:
-						errorCount += 1
-						exitCode = 123
-					}
+					pathQueue <- path
 				}
 				return nil
 			},
@@ -85,25 +76,72 @@ func main() {
 			log.Fatalf("error traversing %s: %v", path, err)
 		}
 	}
+	close(pathQueue)
+	os.Exit(report(conf.Check, actQueue))
+}
+
+func processPathQueue(conf BlackConfig, in <-chan string, out chan<- Action) {
+	var ok bool
+	var path string
+	var wg sync.WaitGroup
+	for {
+		path, ok = <-in
+		if !ok {
+			wg.Wait()
+			close(out)
+			return
+		}
+		wg.Add(1)
+		go processPathInChan(conf, path, out, &wg)
+	}
+}
+
+func report(check bool, actions <-chan Action) int {
+	exitCode := 0
+	unchangedCount := 0
+	reformattedCount := 0
+	errorCount := 0
+	var act Action
+	var ok bool
+	for {
+		act, ok = <-actions
+		if !ok {
+			break
+		}
+		switch act {
+		case Unchanged:
+			unchangedCount += 1
+		case Reformatted:
+			reformattedCount += 1
+		case WouldBeReformatted:
+			reformattedCount += 1
+			if exitCode < 1 {
+				exitCode = 1
+			}
+		case Error:
+			errorCount += 1
+			exitCode = 123
+		}
+	}
 
 	if unchangedCount == 0 && reformattedCount == 0 && errorCount == 0 {
 		fmt.Println("No Python files are present to be formatted. Nothing to do 😴")
-		return
+		return exitCode
 	}
 
-	report := strings.Builder{}
+	b := strings.Builder{}
 	if unchangedCount > 0 {
-		reportCount(&report, conf.Check, unchangedCount, "would be left unchanged", "left unchanged")
+		reportCount(&b, check, unchangedCount, "would be left unchanged", "left unchanged")
 	}
 	if reformattedCount > 0 {
-		reportCount(&report, conf.Check, reformattedCount, "would be reformatted", "reformatted")
+		reportCount(&b, check, reformattedCount, "would be reformatted", "reformatted")
 	}
 	if errorCount > 0 {
-		reportCount(&report, conf.Check, errorCount, "would fail to reformat", "failed to reformat")
+		reportCount(&b, check, errorCount, "would fail to reformat", "failed to reformat")
 	}
-	report.WriteRune('.')
-	log.Println(report.String())
-	os.Exit(exitCode)
+	b.WriteRune('.')
+	log.Println(b.String())
+	return exitCode
 }
 
 func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, statusWithoutCheck string) {
@@ -127,7 +165,12 @@ func reportCount(buf *strings.Builder, check bool, count int, statusWithCheck, s
 
 var client = &http.Client{}
 
-func processPath(conf BlackConfig, path string) PathResult {
+func processPathInChan(conf BlackConfig, path string, actions chan<- Action, group *sync.WaitGroup) {
+	defer group.Done()
+	actions <- processPath(conf, path)
+}
+
+func processPath(conf BlackConfig, path string) Action {
 	resp, err := queryBlackd(conf, path)
 	if err != nil {
 		log.Printf("error: cannot format %s: %v", path, err)
@@ -139,9 +182,9 @@ func processPath(conf BlackConfig, path string) PathResult {
 	if blackErr != nil {
 		if blackErr.Syntax {
 			log.Printf("%s: %s", path, blackErr.Msg)
-			return Error
+		} else {
+			log.Printf("cannot format %s: %s", path, blackErr.Msg)
 		}
-		log.Printf("cannot format %s: %s", path, blackErr.Msg)
 		return Error
 	}
 	if !res.Changed {
@@ -204,7 +247,6 @@ func queryBlackd(conf BlackConfig, path string) (*http.Response, error) {
 	if conf.Diff {
 		req.Header.Set("X-Diff", "1")
 	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s: couldn't reach blackd: %v", path, err)
